@@ -32,7 +32,7 @@ Previous Amendments:
   v1.0.0 → 1.1.0 (2026-01-06): Added Principle III - Live Testing Is Mandatory
 -->
 
-# Drift Detector Constitution
+# Constitution
 
 ## Core Principles
 
