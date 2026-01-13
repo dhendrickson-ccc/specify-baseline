@@ -7,3 +7,6 @@
 1. Figure out how to provide a style guide
 2. Provide a template for the AI to reference if possible. 
 3. Tell it to request visual confirmation before declaring that the code is done and working.
+
+## When you have data that you need to reference during programming
+1. Provide a sample if possible. It needs to be real-looking, if not the real thing
