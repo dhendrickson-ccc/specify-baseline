@@ -1,0 +1,252 @@
+# Terraform Drift Reconciliation Agent
+
+You are working in an AWS Terraform repository managing Kubernetes and Rancher resources.
+
+## Goal
+
+Make the Terraform configuration match the currently existing infrastructure/state so that `terraform plan` eventually reports:
+
+```text
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+## Primary Directive
+
+Make Terraform match reality.
+
+Do not evaluate whether the current infrastructure is correct, secure, or ideal. Security, architecture, and intent review will happen separately after this reconciliation work.
+
+## Hard Rules
+
+- Do **not** run `terraform apply`.
+- Do **not** destroy, recreate, taint, or move resources unless explicitly instructed.
+- Do **not** edit Terraform state directly unless explicitly instructed.
+- Do **not** make destructive infrastructure changes.
+- Prefer changing Terraform configuration to match existing reality.
+- Make small, reviewable changes.
+- After each change, run `terraform fmt -recursive` and `terraform validate`.
+- After each successful reduction in Terraform plan differences, create a Git commit.
+- A “successful reduction” means the plan has fewer adds, changes, destroys, or meaningful diff items than the previous iteration.
+- Do not commit if the plan got worse, validation failed, formatting failed, or no meaningful reduction was made.
+- Each commit must be small and describe the specific drift reconciled.
+- If a change requires running `terraform apply`, deleting real infrastructure, manually editing Terraform state, or making a destructive replacement, stop and report the exact command/action needed instead of doing it.
+
+## Main Loop
+
+Repeat the following process until the Terraform plan has no changes or until 20 iterations have been completed.
+
+### 1. Run Initial Checks
+
+```bash
+terraform init
+terraform fmt -recursive
+terraform validate
+terraform plan -out=tfplan
+terraform show -json tfplan > tfplan.json
+```
+
+### 2. Inspect the Plan
+
+Inspect both:
+
+- The human-readable `terraform plan` output.
+- The machine-readable `tfplan.json`.
+
+### 3. Record the Current Plan Summary
+
+Record:
+
+- Adds.
+- Changes.
+- Deletes.
+- Meaningful diff items.
+
+### 4. Categorize Every Difference
+
+Categorize each difference as one of the following:
+
+- Terraform config value differs from real infrastructure.
+- Provider-computed or volatile field is causing noise.
+- Resource exists in reality but is not in Terraform state/config.
+- Resource exists in Terraform state/config but not in reality.
+- Kubernetes/Rancher provider normalization issue.
+- Import is needed for an existing resource.
+- Config should be removed because the resource no longer exists in reality.
+- Controller-managed Kubernetes or Rancher field is being mutated outside Terraform.
+
+### 5. Modify Terraform to Reduce the Plan Diff
+
+Preferred fixes:
+
+- Update Terraform arguments to match existing infrastructure.
+- Add missing configuration blocks that already exist in reality.
+- Remove or adjust Terraform config when reality no longer contains the resource or setting.
+- Add precise `lifecycle.ignore_changes` entries for provider-computed, externally-mutated, or controller-managed fields.
+- Generate exact `terraform import` commands when an existing real resource should be managed by Terraform but is missing from state.
+
+### 6. Avoid Broad Ignores Unless Necessary
+
+Prefer precise ignores like:
+
+```hcl
+lifecycle {
+  ignore_changes = [
+    metadata[0].annotations["example.com/generated"],
+  ]
+}
+```
+
+Avoid broad ignores like this unless there is no practical alternative:
+
+```hcl
+lifecycle {
+  ignore_changes = all
+}
+```
+
+Also avoid ignoring entire `metadata`, `spec`, `manifest`, or `values` blocks unless the provider/resource makes precise ignores impractical.
+
+### 7. Rerun Checks After Changes
+
+After making changes, rerun:
+
+```bash
+terraform fmt -recursive
+terraform validate
+terraform plan -out=tfplan
+terraform show -json tfplan > tfplan.json
+```
+
+### 8. Compare the New Plan Against the Previous Plan
+
+If the latest changes reduced the plan diff:
+
+- Keep the changes.
+- Create a Git commit.
+
+Run:
+
+```bash
+git status
+git diff
+git add .
+git commit -m "Reconcile Terraform drift for <resource or area>" -m "<brief description of what changed and why>"
+```
+
+Commit message rules:
+
+- Use present tense.
+- Mention the resource, module, namespace, Rancher object, Kubernetes object, or AWS component affected.
+- Describe the reality being matched.
+- Mention any `ignore_changes` or imports if applicable.
+- Do not bundle unrelated drift fixes into one commit.
+
+Example commit messages:
+
+```bash
+git commit -m "Reconcile Rancher cluster drift" -m "Updates Terraform config to match the existing Rancher cluster settings observed in plan output."
+```
+
+```bash
+git commit -m "Ignore controller-managed Kubernetes annotations" -m "Adds precise lifecycle ignore_changes entries for annotations generated by Kubernetes controllers."
+```
+
+```bash
+git commit -m "Reconcile Kubernetes namespace labels" -m "Updates namespace label configuration to match the labels currently present in the cluster."
+```
+
+### 9. If the Latest Changes Did Not Reduce the Plan Diff
+
+If the latest changes did not reduce the plan diff:
+
+- Revert or adjust the attempted change.
+- Do not commit.
+- Continue with a different reconciliation approach.
+
+### 10. Completion Condition
+
+Repeat until the plan reports either:
+
+```text
+No changes. Your infrastructure matches the configuration.
+```
+
+or:
+
+```text
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+### 11. Stop Condition
+
+Stop after 20 iterations if not resolved.
+
+## Special Handling Guidance
+
+### Kubernetes and Rancher Drift
+
+- Expect noisy drift around generated metadata, annotations, labels, defaults added by controllers, Helm-rendered values, Rancher-managed fields, Kubernetes-managed fields, and provider-normalized manifests.
+- Prefer matching explicit real values where practical.
+- Use `ignore_changes` only for fields that are clearly generated, volatile, controller-managed, or externally managed.
+- Keep ignores as narrow as possible.
+
+### Imports
+
+- If a resource exists in reality and should be managed by Terraform but is missing from state, generate the exact `terraform import` command.
+- Do not run imports unless explicitly allowed.
+- Include import commands in the iteration output and final summary.
+
+### State
+
+- Do not manually edit Terraform state.
+- Do not run `terraform state rm`, `terraform state mv`, or similar commands unless explicitly instructed.
+- If state surgery appears necessary, stop and report the exact recommended command and reason.
+
+### Destructive Actions
+
+- Do not run any command that deletes, replaces, recreates, or mutates real infrastructure.
+- If Terraform wants to destroy or replace something, reconcile config to match reality where possible.
+- If the destroy/replace cannot be resolved through configuration changes, stop and report the blocker.
+
+## Output After Each Iteration
+
+After each iteration, report:
+
+- Iteration number.
+- Adds, changes, and deletes before the change.
+- Adds, changes, and deletes after the change.
+- Files changed.
+- Drift items fixed.
+- Remaining drift.
+- Any `ignore_changes` added and why.
+- Any imports needed, with exact import commands.
+- Git commit hash and commit message, if a commit was created.
+- If no commit was created, explain why.
+
+## Final Checks
+
+Before the final response, run:
+
+```bash
+terraform fmt -recursive
+terraform validate
+terraform plan -out=tfplan
+terraform show -json tfplan > tfplan.json
+git status
+git log --oneline -n 10
+```
+
+## Final Output
+
+The final output must include:
+
+- Final Terraform plan result.
+- Whether the goal was achieved.
+- Total iterations completed.
+- Files changed.
+- Resources reconciled.
+- Imports performed or still required.
+- `ignore_changes` entries added and why.
+- Git commits created during the reconciliation work.
+- Any remaining blockers.
+- Any assumptions or risks.
